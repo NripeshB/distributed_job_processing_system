@@ -18,7 +18,7 @@ import (
 
 type createJobRequest struct {
 	Type    string          `json:"type"`
-	Payload json.RawMessage `json: "payload"`
+	Payload json.RawMessage `json:"payload"`
 }
 
 type Handler struct {
@@ -118,6 +118,12 @@ func (h *Handler) listJobs(w http.ResponseWriter, r *http.Request) {
 		}
 		return jobs[i].CreatedAt.Before(jobs[i].CreatedAt)
 	})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	if err := json.NewEncoder(w).Encode(jobs); err != nil {
+		log.Printf("encode job responses: %v", err)
+	}
 
 }
 
