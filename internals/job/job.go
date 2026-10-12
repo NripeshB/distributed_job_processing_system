@@ -2,8 +2,11 @@ package job
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 )
+
+var ErrorNotFound = errors.New("job not found")
 
 type Job struct {
 	ID        string          `json:"id"`
