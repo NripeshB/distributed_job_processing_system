@@ -13,5 +13,5 @@ type Job struct {
 	Type      string          `json:"type"`
 	Payload   json.RawMessage `json:"payload"`
 	Status    string          `json:"status"`
-	CreatedAt time.Time       `json:"createdat"`
+	CreatedAt time.Time       `json:"created_at"`
 }
