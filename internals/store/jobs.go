@@ -95,5 +95,22 @@ func (s *PostgresStore) List(ctx context.Context) ([]job.Job, error) {
 }
 
 func (s *PostgresStore) UpdateStatus(ctx context.Context, id string, status string) error {
+	result, err := s.db.ExecContext(
+		ctx,
+		`UPDATE jobs SET status = $2 WHERE id = $1`,
+		id,
+		status,
+	)
+	if err != nil {
+		return fmt.Errorf("update job status: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected cout %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("%w: %s", job.ErrorNotFound, id)
+	}
+	return nil
 
 }
