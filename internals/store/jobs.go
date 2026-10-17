@@ -9,7 +9,7 @@ import (
 	"github.com/NripeshB/distributed_job_processing_system/internals/job"
 )
 
-const jobColumns = `id, type , payload, status, created_at`
+const jobColumns = ` id, type , payload, status, created_at `
 
 type scanner interface {
 	Scan(dest ...any) error
@@ -57,7 +57,7 @@ func (s *PostgresStore) GetByID(
 	id string,
 ) (job.Job, error) {
 
-	query := `SELECT` + jobColumns + `FROM job WHERE id = $1`
+	query := `SELECT ` + jobColumns + `FROM jobs WHERE id = $1`
 	j, err := scanJob(s.db.QueryRowContext(ctx, query, id))
 
 	if errors.Is(err, sql.ErrNoRows) {
@@ -71,7 +71,7 @@ func (s *PostgresStore) GetByID(
 
 func (s *PostgresStore) List(ctx context.Context) ([]job.Job, error) {
 
-	query := `SELECT` + jobColumns + `FROM job ORDER BY created_at DESC, id ASC`
+	query := `SELECT ` + jobColumns + `FROM jobs ORDER BY created_at DESC, id ASC`
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("query jobs: %w", err)
