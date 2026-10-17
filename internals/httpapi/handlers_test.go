@@ -1,205 +1,273 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NripeshB/distributed_job_processing_system/internals/job"
 )
 
-func newTestMux() *http.ServeMux {
+type fakeJobStore struct {
+	jobs      map[string]job.Job
+	createErr error
+	getErr    error
+	listErr   error
+}
+
+func newFakeJobStore() *fakeJobStore {
+	return &fakeJobStore{jobs: make(map[string]job.Job)}
+}
+
+func (s *fakeJobStore) Create(_ context.Context, j job.Job) (job.Job, error) {
+	if s.createErr != nil {
+		return job.Job{}, s.createErr
+	}
+	s.jobs[j.ID] = j
+	return j, nil
+}
+
+func (s *fakeJobStore) GetByID(_ context.Context, id string) (job.Job, error) {
+	if s.getErr != nil {
+		return job.Job{}, s.getErr
+	}
+	j, ok := s.jobs[id]
+	if !ok {
+		return job.Job{}, job.ErrorNotFound
+	}
+	return j, nil
+}
+
+func (s *fakeJobStore) List(_ context.Context) ([]job.Job, error) {
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	jobs := make([]job.Job, 0, len(s.jobs))
+	for _, j := range s.jobs {
+		jobs = append(jobs, j)
+	}
+	return jobs, nil
+}
+
+func testMux(store *fakeJobStore) *http.ServeMux {
 	mux := http.NewServeMux()
-
-	handler := NewHandler()
-	handler.RegisterRouter(mux)
-
+	NewHandler(store).RegisterRoutes(mux)
 	return mux
 }
 
 func TestHealth(t *testing.T) {
-	mux := newTestMux()
-
+	mux := testMux(newFakeJobStore())
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status %d, got %d",
-			http.StatusOK, rec.Code)
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var got map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got["status"] != "ok" {
+		t.Fatalf("status field = %q, want %q", got["status"], "ok")
 	}
 }
 
 func TestCreateJob(t *testing.T) {
-	mux := newTestMux()
-
-	body := `{
-		"type": "send_email",
-		"payload": {"email": "user@example.com"}
-	}`
+	store := newFakeJobStore()
+	mux := testMux(store)
 
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/jobs",
-		strings.NewReader(body),
+		strings.NewReader(`{"type":"email","payload":{"to":"test@example.com"}}`),
 	)
 	req.Header.Set("Content-Type", "application/json")
-
 	rec := httptest.NewRecorder()
+
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusCreated {
-		t.Fatalf("expected status %d, got %d: %s",
-			http.StatusCreated, rec.Code, rec.Body.String())
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusCreated, rec.Body.String())
 	}
 
-	var created job.Job
-	if err := json.NewDecoder(rec.Body).Decode(&created); err != nil {
+	var got job.Job
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-
-	if created.ID == "" {
-		t.Fatal("expected a generated ID")
+	if got.ID == "" {
+		t.Fatal("created job has an empty ID")
 	}
-
-	if created.Type != "send_email" {
-		t.Errorf("expected type send_email, got %q", created.Type)
+	if got.Type != "email" {
+		t.Fatalf("type = %q, want %q", got.Type, "email")
 	}
-
-	if created.Status != "pending" {
-		t.Errorf("expected status pending, got %q", created.Status)
+	if got.Status != "pending" {
+		t.Fatalf("status = %q, want %q", got.Status, "pending")
 	}
-}
-
-func TestCreateJobRejectsInvalidJSON(t *testing.T) {
-	mux := newTestMux()
-
-	req := httptest.NewRequest(
-		http.MethodPost,
-		"/jobs",
-		strings.NewReader(`{"type":`),
-	)
-
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected status %d, got %d",
-			http.StatusBadRequest, rec.Code)
+	if len(got.Payload) == 0 {
+		t.Fatal("created job has an empty payload")
+	}
+	if _, ok := store.jobs[got.ID]; !ok {
+		t.Fatalf("created job %q was not passed to the store", got.ID)
 	}
 }
 
-func TestCreateJobRejectsMissingType(t *testing.T) {
-	mux := newTestMux()
+func TestCreateJobRejectsInvalidRequests(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "invalid JSON", body: `{"type":`},
+		{name: "missing type", body: `{"payload":{"to":"test@example.com"}}`},
+		{name: "empty type", body: `{"type":"  ","payload":{"to":"test@example.com"}}`},
+		{name: "payload is not an object", body: `{"type":"email","payload":[]}`},
+		{name: "unknown field", body: `{"type":"email","payload":{},"unexpected":true}`},
+		{name: "multiple JSON values", body: `{"type":"email","payload":{}} {"type":"email","payload":{}}`},
+	}
 
-	body := `{"payload":{"email":"user@example.com"}}`
-	req := httptest.NewRequest(
-		http.MethodPost,
-		"/jobs",
-		strings.NewReader(body),
-	)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mux := testMux(newFakeJobStore())
+			req := httptest.NewRequest(http.MethodPost, "/jobs", strings.NewReader(tt.body))
+			rec := httptest.NewRecorder()
 
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestGetJob(t *testing.T) {
+	store := newFakeJobStore()
+	want := job.Job{
+		ID:        "job-123",
+		Type:      "email",
+		Payload:   json.RawMessage(`{"to":"test@example.com"}`),
+		Status:    "pending",
+		CreatedAt: time.Date(2026, time.October, 17, 0, 0, 0, 0, time.UTC),
+	}
+	store.jobs[want.ID] = want
+	mux := testMux(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/jobs/"+want.ID, nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected status %d, got %d",
-			http.StatusBadRequest, rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var got job.Job
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.ID != want.ID {
+		t.Fatalf("ID = %q, want %q", got.ID, want.ID)
+	}
+	if got.Type != want.Type {
+		t.Fatalf("type = %q, want %q", got.Type, want.Type)
 	}
 }
 
 func TestGetJobNotFound(t *testing.T) {
-	mux := newTestMux()
-
-	req := httptest.NewRequest(
-		http.MethodGet,
-		"/jobs/unknown",
-		nil,
-	)
-
+	mux := testMux(newFakeJobStore())
+	req := httptest.NewRequest(http.MethodGet, "/jobs/does-not-exist", nil)
 	rec := httptest.NewRecorder()
+
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
-		t.Fatalf("expected status %d, got %d",
-			http.StatusNotFound, rec.Code)
-	}
-}
-
-func TestCreateThenGetJob(t *testing.T) {
-	mux := newTestMux()
-
-	body := `{"type":"send_email","payload":{"email":"a@example.com"}}`
-	createReq := httptest.NewRequest(
-		http.MethodPost,
-		"/jobs",
-		strings.NewReader(body),
-	)
-	createRec := httptest.NewRecorder()
-
-	mux.ServeHTTP(createRec, createReq)
-
-	if createRec.Code != http.StatusCreated {
-		t.Fatalf("create: expected %d, got %d",
-			http.StatusCreated, createRec.Code)
-	}
-
-	var created job.Job
-	if err := json.NewDecoder(createRec.Body).Decode(&created); err != nil {
-		t.Fatalf("decode created job: %v", err)
-	}
-
-	getReq := httptest.NewRequest(
-		http.MethodGet,
-		"/jobs/"+created.ID,
-		nil,
-	)
-	getRec := httptest.NewRecorder()
-
-	mux.ServeHTTP(getRec, getReq)
-
-	if getRec.Code != http.StatusOK {
-		t.Fatalf("get: expected %d, got %d",
-			http.StatusOK, getRec.Code)
-	}
-
-	var fetched job.Job
-	if err := json.NewDecoder(getRec.Body).Decode(&fetched); err != nil {
-		t.Fatalf("decode fetched job: %v", err)
-	}
-
-	if fetched.ID != created.ID {
-		t.Errorf("expected ID %q, got %q", created.ID, fetched.ID)
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusNotFound, rec.Body.String())
 	}
 }
 
 func TestListJobs(t *testing.T) {
-	mux := newTestMux()
+	store := newFakeJobStore()
+	store.jobs["job-1"] = job.Job{
+		ID:        "job-1",
+		Type:      "email",
+		Payload:   json.RawMessage(`{"to":"one@example.com"}`),
+		Status:    "pending",
+		CreatedAt: time.Date(2026, time.October, 17, 0, 0, 0, 0, time.UTC),
+	}
+	store.jobs["job-2"] = job.Job{
+		ID:        "job-2",
+		Type:      "email",
+		Payload:   json.RawMessage(`{"to":"two@example.com"}`),
+		Status:    "pending",
+		CreatedAt: time.Date(2026, time.October, 17, 1, 0, 0, 0, time.UTC),
+	}
+	mux := testMux(store)
 
-	// An empty collection should be [] rather than null.
 	req := httptest.NewRequest(http.MethodGet, "/jobs", nil)
 	rec := httptest.NewRecorder()
-
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status %d, got %d",
-			http.StatusOK, rec.Code)
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 
-	var jobs []job.Job
-	if err := json.NewDecoder(rec.Body).Decode(&jobs); err != nil {
-		t.Fatalf("decode jobs: %v", err)
+	var got []job.Job
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
 	}
-
-	if jobs == nil {
-		t.Fatal("expected an empty JSON array, got null")
+	if len(got) != 2 {
+		t.Fatalf("job count = %d, want 2; body=%s", len(got), rec.Body.String())
 	}
+}
 
-	if len(jobs) != 0 {
-		t.Fatalf("expected 0 jobs, got %d", len(jobs))
+func TestGetJobStoreError(t *testing.T) {
+	store := newFakeJobStore()
+	store.getErr = errors.New("database unavailable")
+	mux := testMux(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/jobs/job-123", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+}
+
+func TestListJobsStoreError(t *testing.T) {
+	store := newFakeJobStore()
+	store.listErr = errors.New("database unavailable")
+	mux := testMux(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/jobs", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+}
+
+func TestCreateJobStoreError(t *testing.T) {
+	store := newFakeJobStore()
+	store.createErr = errors.New("database unavailable")
+	mux := testMux(store)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/jobs",
+		strings.NewReader(`{"type":"email","payload":{"to":"test@example.com"}}`),
+	)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
 	}
 }
