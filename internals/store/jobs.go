@@ -9,7 +9,7 @@ import (
 	"github.com/NripeshB/distributed_job_processing_system/internals/job"
 )
 
-const jobColumns = ` id, type , payload, status, created_at `
+const jobColumns = ` id, type , payload, status, created_at, started_at, completed_at, attempts `
 
 type scanner interface {
 	Scan(dest ...any) error
@@ -25,6 +25,9 @@ func scanJob(row scanner) (job.Job, error) {
 		&payload,
 		&j.Status,
 		&j.CreatedAt,
+		&j.StartedAt,
+		&j.CompletedAt,
+		&j.Attempts,
 	)
 	if err != nil {
 		return job.Job{}, err
@@ -113,4 +116,64 @@ func (s *PostgresStore) UpdateStatus(ctx context.Context, id string, status stri
 	}
 	return nil
 
+}
+
+func (s *PostgresStore) ClaimNext(ctx context.Context) (job.Job, error) {
+
+	const query = `
+		WITH next_job AS(
+			SELECT id
+			FROM jobs
+			WHERE status = 'pending'
+			ORDER BY created_at ASC, id ASC
+			FOR UPDATE SKIP LOCKED
+			LIMIT 1
+		)
+		UPDATE jobs AS j
+		SET
+			status = 'processing',
+			started_at = NOW(),
+			attempts = attempts+1,
+
+		FROM next_job
+		WHERE j.id = next_job.id
+		RETURNING
+			j.id, j.type, j.payload, j.status, j.created_at, j.started_at, j.attempts
+	`
+	claimed, err := scanJob(s.db.QueryRowContext(ctx, query))
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return job.Job{}, job.ErrorNotFound
+	}
+	if err != nil {
+		return job.Job{}, err
+	}
+	return claimed, nil
+}
+func (s *PostgresStore) Complete(ctx context.Context, id string, succeeded bool) error {
+	status := "failed"
+	if succeeded {
+		status = "succeeded"
+	}
+	const query = `
+		UPDATE jobs
+		SET
+			status = $2,
+			completed_at = NOW()
+		WHERE id = $1
+		AND status = 'processing'
+	`
+	result, err := s.db.ExecContext(ctx, query, id, status)
+	if err != nil {
+		return fmt.Errorf("Job completed with id %s: %w", id, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("Checking completed job %s: %w", id, err)
+	}
+
+	if affected != 1 {
+		return fmt.Errorf("job %s is missing or is not processing", id)
+	}
+	return nil
 }
