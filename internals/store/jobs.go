@@ -119,27 +119,32 @@ func (s *PostgresStore) UpdateStatus(ctx context.Context, id string, status stri
 }
 
 func (s *PostgresStore) ClaimNext(ctx context.Context) (job.Job, error) {
-
 	const query = `
-		WITH next_job AS(
-			SELECT id
-			FROM jobs
-			WHERE status = 'pending'
-			ORDER BY created_at ASC, id ASC
-			FOR UPDATE SKIP LOCKED
-			LIMIT 1
-		)
-		UPDATE jobs AS j
-		SET
-			status = 'processing',
-			started_at = NOW(),
-			attempts = attempts+1,
-
-		FROM next_job
-		WHERE j.id = next_job.id
-		RETURNING
-			j.id, j.type, j.payload, j.status, j.created_at, j.started_at, j.attempts
-	`
+    WITH next_job AS (
+        SELECT id
+        FROM jobs
+        WHERE status = 'pending'
+        ORDER BY created_at ASC, id ASC
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1
+    )
+    UPDATE jobs AS j
+    SET
+        status = 'processing',
+        started_at = NOW(),
+        attempts = attempts + 1
+    FROM next_job
+    WHERE j.id = next_job.id
+    RETURNING
+        j.id,
+        j.type,
+        j.payload,
+        j.status,
+        j.created_at,
+        j.started_at,
+        j.completed_at,
+        j.attempts
+`
 	claimed, err := scanJob(s.db.QueryRowContext(ctx, query))
 
 	if errors.Is(err, sql.ErrNoRows) {

@@ -66,7 +66,7 @@ func run() error {
 			if ctx.Err() != nil {
 				return nil
 			}
-			log.Printf("Job claiming failed: %w", err)
+			log.Printf("Job claiming failed: %v", err)
 			select {
 			case <-ticker.C:
 				continue
