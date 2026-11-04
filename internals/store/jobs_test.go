@@ -47,8 +47,6 @@ func openTestStore(t *testing.T) *PostgresStore {
 		}
 	})
 
-	// ClaimNext searches globally for pending jobs. For these tests,
-	// the dedicated test queue must have no pre-existing pending jobs.
 	var pending int
 	err = s.db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM jobs WHERE status = 'pending'",
@@ -84,7 +82,6 @@ func insertTestJob(t *testing.T, s *PostgresStore) string {
 		t.Fatalf("insert test job: %v", err)
 	}
 
-	// Cleanup runs even if the test fails.
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(
 			context.Background(), 5*time.Second,
@@ -244,7 +241,6 @@ func TestCompletePendingJobIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// A pending job must not be completed without being claimed.
 	err := s.Complete(ctx, id, true)
 	if err == nil {
 		t.Fatal("expected completing a pending job to fail")
@@ -279,8 +275,6 @@ func TestConcurrentClaimIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Both goroutines wait on the same signal before attempting
-	// to claim the only pending job.
 	for i := 0; i < workers; i++ {
 		go func() {
 			<-start

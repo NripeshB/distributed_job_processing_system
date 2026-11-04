@@ -13,6 +13,7 @@ import (
 
 	"github.com/NripeshB/distributed_job_processing_system/internals/httpapi"
 	"github.com/NripeshB/distributed_job_processing_system/internals/store"
+	"github.com/joho/godotenv"
 )
 
 func main() {
@@ -28,6 +29,10 @@ func run() error {
 		syscall.SIGTERM,
 	)
 	defer stop()
+
+	if err := godotenv.Load(); err != nil {
+		log.Println("No env file found!")
+	}
 
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
