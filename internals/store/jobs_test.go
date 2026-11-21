@@ -10,10 +10,12 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/NripeshB/distributed_job_processing_system/internals/job"
+	"golang.org/x/tools/go/analysis/passes/waitgroup"
 )
 
 func openTestStore(t *testing.T) *PostgresStore {
@@ -335,4 +337,123 @@ func TestConcurrentClaimIntegration(t *testing.T) {
 		"2 concurrent claimants: %d successful, %d empty-queue; attempts=%d",
 		successfulClaims, emptyQueueResults, state.attempts,
 	))
+}
+
+func TestMultipleWorkersClaimDiffJobs(t *testing.T) {
+	s := openTestStore(t)
+
+	const (
+		totalJobs = 10
+		workers   = 3
+	)
+
+	for i := 0; i < totalJobs; i++ {
+		insertTestJob(t, s)
+	}
+
+	type claimResult struct {
+		workerID  int
+		claimedID string
+		err       error
+	}
+
+	start := make(chan struct{})
+	results := make(chan claimResult, totalJobs+workers)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+
+		go func(workerID int) {
+			defer wg.Done()
+
+			<-start
+
+			for {
+				claimed, err := s.ClaimNext(ctx)
+
+				if errors.Is(err, job.ErrorNotFound) {
+					break
+				}
+
+				if err != nil {
+					results <- claimResult{
+						workerID: workerID,
+						err:      err,
+					}
+					break
+				}
+
+				results <- claimResult{
+					workerID:  workerID,
+					claimedID: claimed.ID,
+				}
+			}
+		}(i)
+	}
+
+	close(start)
+
+	wg.Wait()
+	close(results)
+
+	claimedIDs := make(map[string]struct{})
+	workerClaims := make(map[int]int)
+
+	var successfulClaims int
+
+	for result := range results {
+		if result.err != nil {
+			t.Errorf("worker %d encountered an error: %v",
+				result.workerID, result.err)
+			continue
+		}
+
+		successfulClaims++
+
+		if _, exists := claimedIDs[result.claimedID]; exists {
+			t.Errorf("job %q was claimed more than once",
+				result.claimedID)
+		}
+
+		claimedIDs[result.claimedID] = struct{}{}
+		workerClaims[result.workerID]++
+	}
+
+	if successfulClaims != totalJobs {
+		t.Errorf("successful claims = %d; want %d",
+			successfulClaims, totalJobs)
+	}
+
+	if len(claimedIDs) != totalJobs {
+		t.Errorf("unique claimed jobs = %d; want %d",
+			len(claimedIDs), totalJobs)
+	}
+
+	for id := range claimedIDs {
+		state := readJobState(t, s, id)
+
+		if state.status != "processing" {
+			t.Errorf("job %q status = %q; want processing",
+				id, state.status)
+		}
+
+		if state.attempts != 1 {
+			t.Errorf("job %q attempts = %d; want 1",
+				id, state.attempts)
+		}
+
+		if !state.startedAt.Valid {
+			t.Errorf("job %q should have started_at populated", id)
+		}
+	}
+
+	t.Logf("Successfully claimed %d unique jobs across %d workers",
+		successfulClaims, workers)
+
+	t.Logf("Worker distribution: %+v", workerClaims)
 }
